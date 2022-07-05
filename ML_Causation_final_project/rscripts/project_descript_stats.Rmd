@@ -1,0 +1,828 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r, warning=FALSE, message=FALSE}
+#rm(list=ls())
+library(ggplot2)
+library(tidyr)
+library(predictrace)
+#citation https://cran.r-project.org/web/packages/predictrace/vignettes/Predict-race-of-surname.html
+library(rethnicity)
+#citation https://github.com/fangzhou-xie/rethnicity
+library(psych)
+library(genderizeR)
+#https://github.com/kalimu/genderizeR
+library(gender)
+#https://www.rdocumentation.org/packages/gender/versions/0.6.0
+
+library(dplyr)
+
+library(causalTree)
+
+# use e.g., install.packages("grf") to install any of the following packages.
+library(grf)
+library(rpart)
+library(glmnet)
+library(splines)
+library(MASS)
+library(lmtest)
+library(sandwich)
+library(ggplot2)
+library(tidyverse)
+library(tidymodels)
+library(fastDummies)
+
+library(xtable)
+```
+```{r}
+setwd(getwd())
+getwd()
+```
+
+```{r read in data}
+
+ICLR_2018 = read.csv(".\\ICLR_2018.csv")
+ICLR_2019 = read.csv("ICLR_2019.csv")
+ICLR_2017_authors = read.csv("ICLR_2017_author.csv")
+ICLR_2017_conversations = read.csv("iclr2017_conversations.csv")
+
+ICLR_2018 = ICLR_2018[c(names(ICLR_2018)[1:14])]
+ICLR_2019 = ICLR_2019[c(names(ICLR_2019)[1:14])]
+```
+
+
+```{r number of submissions by year}
+yvalue = c(length(unique(ICLR_2017_authors$forum)),length(unique(ICLR_2018$forum)), length(unique(ICLR_2019$forum)))
+xvalue = as(c(2017,2018,2019), 'integer')
+number_of_papers = data.frame(xvalue,yvalue)
+yvalue
+
+ggplot(number_of_papers, aes(x=xvalue, y=yvalue, color = xvalue)) +
+  geom_line() +
+  geom_point(size = yvalue/150, alpha= 0.5) +
+  ggtitle("Number of Submissions to ICLR 2017 - 2019") +
+  labs(x = "Conference Year", y = "Number of Submission") +
+  scale_x_discrete(limit = c(2017, 2018, 2019)) +
+  geom_text(
+    label=yvalue,
+    nudge_x=0.2, nudge_y=0.1,
+    check_overlap=T) +
+  theme(legend.position="none")#+  geom_label_repel(aes(label = yvalue,  color = xvalue), size = 3)
+#ggsave("submission_n.png")
+```
+```{r get all the author names}
+
+authors = rbind(ICLR_2017_authors[c('year','authors','forum')],ICLR_2018[c('year','authors','forum')],ICLR_2019[c('year','authors','forum')])
+authors = unique(authors)
+authors = as.data.frame(authors)
+
+authors = extract(authors,authors,c("First_Name","Last_Name"), "([^ ]+) (.*)")
+
+authors = na.omit(authors)
+
+```
+
+
+```{r infer race given year by package}
+#['race'] = predict_race(authors$Last_Name,probability = F)[3]
+
+authors['race'] = predict_ethnicity(firstnames = authors$First_Name, lastnames = authors$Last_Name, method = "fullname")[7]
+```
+```{r infer gender given name by package}
+#can only make 1 k request a day
+#saved_output= findGivenNames(authors$First_Name, progress = FALSE)
+```
+
+```{r diversity changes over the years}
+df = authors %>% group_by(year,race) %>%
+  dplyr::summarise(n = n()) %>%
+  mutate(freq = round(n  / sum(n ), 3))
+df
+ggplot(df, aes(x = year, y = freq)) + 
+  geom_line(aes(color = race, linetype = race)) + 
+  scale_color_manual(values = c("darkred", "steelblue",'green','purple')) +
+  ggtitle("Percent of Authors by Racial Identity from ICLR 2017 - 2019")+
+  scale_x_discrete(limit = c(2017, 2018, 2019)) + 
+  geom_point()
+#ggsave("freq_authors.png")
+ggplot(df, aes(x = year, y = n)) + 
+  geom_line(aes(color = race, linetype = race)) + 
+  scale_color_manual(values = c("darkred", "steelblue",'green','purple')) +
+  ggtitle("Number of Authors by Racial Identity from ICLR 2017 - 2019") +
+  scale_x_discrete(limit = c(2017, 2018, 2019)) +
+  geom_point()
+#ggsave("N_authors.png")
+```
+```{r cleaning up reviewer comments}
+ICLR_2017_reviews = ICLR_2017_conversations[c("year","forum", "rating"   ,"confidence"  ,  "review" )]
+ICLR_2017_reviews = ICLR_2017_reviews %>%
+  na_if("") %>%
+  na.omit
+
+ICLR_2018_reviews = ICLR_2018[c("year" , "forum"  ,  "rating"  ,  "confidence", "review")]
+ICLR_2019_reviews = ICLR_2019[c("year" , "forum"  ,  "rating"  ,  "confidence", "review")]
+
+ICLR_reviews = rbind(ICLR_2017_reviews,ICLR_2018_reviews,ICLR_2019_reviews)
+
+ICLR_reviews['rating_number'] = as(sub(":.*","",ICLR_reviews$rating),'numeric')
+
+ICLR_reviews['confidence_number'] = as(sub(":.*","",ICLR_reviews$confidence),'numeric')
+ICLR_reviews['review_length'] = nchar(ICLR_reviews$review)
+
+ICLR_reviews = ICLR_reviews %>% mutate(review_length_quantile = ntile(review_length, 4))
+#$review_length_quantile = as.factor(ICLR_reviews$review_length_quantile)
+ICLR_reviews = unique(ICLR_reviews)
+```
+
+```{r}
+
+
+xtable(ICLR_reviews %>% group_by(year) %>%
+  summarise(rating_average = mean(`rating_number`, na.rm=T), expert_average = mean(`confidence_number`, na.rm=T), review_length_average = mean(`review_length`, na.rm=T)))
+ICLR_summary_stats = ICLR_reviews %>% group_by(year) %>%
+  summarise(rating_average = mean(`rating_number`, na.rm=T), expert_average = mean(`confidence_number`, na.rm=T), review_length_average = mean(`review_length`, na.rm=T), rating_sd = sd(`rating_number`, na.rm = T))
+
+ggplot(ICLR_summary_stats, aes(x=year, y=rating_average)) + geom_point() +
+  geom_errorbar(aes(ymin=rating_average-rating_sd, ymax=rating_average+rating_sd), width=.2,
+                position=position_dodge(0.05)) +
+  scale_x_discrete(limit = c(2017, 2018, 2019)) +
+  geom_vline(xintercept = 2017.5, linetype="dotted", 
+                color = "red", size=1.5) +
+  #geom_text(aes(x=2017.5, label="\nShift to Double Blind", y=5), colour="red", angle=90, text=element_text(size=11)) +
+  geom_line() +
+  ggtitle("Average Review Score from ICLR 2017 - 2019")
+
+```
+
+
+
+
+```{r Treatment and control group}
+rm(ICLR_analysis_ARI)
+ICLR_analysis_ARI = ICLR_reviews %>% filter(year %in% c(2017,2018))
+
+ICLR_analysis_ARI = full_join(x=ICLR_analysis_ARI,y=authors,by="forum")
+
+
+ICLR_reviews %>% filter(forum == 'B1-q5Pqxl')
+
+ICLR_analysis_ARI %>% filter(forum == 'B1-q5Pqxl')
+
+authors %>% filter(forum == 'B1-q5Pqxl')
+
+
+ICLR_analysis_ARI = ICLR_analysis_ARI %>% mutate(W = if_else(year.x==2017,0,1))
+
+ICLR_analysis_ARI = na.omit(ICLR_analysis_ARI)
+ICLR_analysis_ARI = unique(ICLR_analysis_ARI)
+
+ICLR_analysis_ARI%>% group_by(W) %>% summarise(n())
+
+```
+
+
+```{r}
+#hist(ICLR_analysis$review_length)
+
+
+ICLR_analysis_ARI %>% filter(review_length >= 10000) %>% summarise(n())
+
+
+treated_review_length = ICLR_analysis_ARI %>% filter(W == 1) %>% dplyr::select(review_length,review_length_quantile)
+
+treated_review_length$treatment = 'Treated'
+
+control_review_length = ICLR_analysis_ARI %>% filter(W == 0) %>% dplyr::select(review_length,review_length_quantile)
+
+control_review_length$treatment = 'Control'
+
+ICLR_review_length = rbind(control_review_length, treated_review_length)
+
+ggplot(ICLR_review_length, aes(x=review_length,fill= treatment)) + geom_histogram(alpha = .2)
+
+ggplot(ICLR_review_length, aes(x=review_length_quantile,fill= treatment)) + geom_histogram(alpha = .2)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r AIPW with causal forest}
+#names(ICLR_analysis)
+#c("rating","confidence","review","rating number","confidence number","review length","First_Name","Last_Name","race")
+
+#why does this change with adding additional covariates specifically race?
+covariates = c("confidence_number","review_length_quantile", "race")
+XX <- model.matrix(formula(paste0("~", paste0(covariates, collapse="+"))), data=ICLR_analysis_ARI)
+
+set.seed(1)
+
+forest <- causal_forest(
+              X=XX,  
+              W=ICLR_analysis_ARI[,"W"],
+              Y=ICLR_analysis_ARI[,"rating_number"]
+              #,num.trees = 100
+              )
+
+#what does the target sample mean and what I should use
+forest.ate <- average_treatment_effect(forest)
+
+#forest.ate <- average_treatment_effect(forest, target.sample="control")
+forest.ate
+hist(forest$W.hat, main="Estimated propensity scores \n(causal forest with interaction data)", xlim=c(-.1, 1.1))
+
+```
+```{r}
+X <- model.matrix(formula("~ 0 + review_length_quantile + confidence_number"), ICLR_analysis_ARI)
+W <- ICLR_analysis_ARI$W
+Y <- ICLR_analysis_ARI$rating_number
+par(mfrow=c(1,2))
+for (w in c(0, 1)) {
+  plot(X[W==w,1] + rnorm(n=sum(W==w), sd=.1), X[W==w,2] + rnorm(n=sum(W==w), sd=.1), 
+       pch=ifelse(Y, 23, 21), cex=1, col=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)),
+       bg=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)), main=ifelse(w, "Treated", "Untreated"), xlab="confidence_number", ylab="review_length_quantile")
+}
+
+```
+
+```{r}
+X <- model.matrix(formula("~ 0 + confidence_number + race"), ICLR_analysis_ARI)
+W <- ICLR_analysis_ARI$W
+Y <- ICLR_analysis_ARI$rating_number
+par(mfrow=c(1,2))
+for (w in c(0, 1)) {
+  plot(X[W==w,1] + rnorm(n=sum(W==w), sd=.1), X[W==w,2] + rnorm(n=sum(W==w), sd=.1), 
+       pch=ifelse(Y, 23, 21), cex=1, col=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)),
+       bg=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)), main=ifelse(w, "Treated", "Untreated"), xlab="confidence_number", ylab="race")
+}
+```
+```{r}
+X <- model.matrix(formula("~ 0 + review_length_quantile + race"), ICLR_analysis_ARI)
+W <- ICLR_analysis_ARI$W
+Y <- ICLR_analysis_ARI$rating_number
+par(mfrow=c(1,2))
+for (w in c(0, 1)) {
+  plot(X[W==w,1] + rnorm(n=sum(W==w), sd=.1), X[W==w,2] + rnorm(n=sum(W==w), sd=.1), 
+       pch=ifelse(Y, 23, 21), cex=1, col=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)),
+       bg=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)), main=ifelse(w, "Treated", "Untreated"), xlab="review_length_quantile", ylab="race")
+}
+```
+
+```{r functions from the tutorial}
+# Auxiliary function to computes adjusted p-values 
+# following the Romano-Wolf method.
+# For a reference, see http://ftp.iza.org/dp12845.pdf page 8
+#  t.orig: vector of t-statistics from original model
+#  t.boot: matrix of t-statistics from bootstrapped models
+romano_wolf_correction <- function(t.orig, t.boot) {
+  abs.t.orig <- abs(t.orig)
+  abs.t.boot <- abs(t.boot)
+  abs.t.sorted <- sort(abs.t.orig, decreasing = TRUE)
+
+  max.order <- order(abs.t.orig, decreasing = TRUE)
+  rev.order <- order(max.order)
+
+  M <- nrow(t.boot)
+  S <- ncol(t.boot)
+
+  p.adj <- rep(0, S)
+  p.adj[1] <- mean(apply(abs.t.boot, 1, max) > abs.t.sorted[1])
+  for (s in seq(2, S)) {
+    cur.index <- max.order[s:S]
+    p.init <- mean(apply(abs.t.boot[, cur.index, drop=FALSE], 1, max) > abs.t.sorted[s])
+    p.adj[s] <- max(p.init, p.adj[s-1])
+  }
+  p.adj[rev.order]
+}
+
+# Computes adjusted p-values for linear regression (lm) models.
+#    model: object of lm class (i.e., a linear reg model)
+#    indices: vector of integers for the coefficients that will be tested
+#    cov.type: type of standard error (to be passed to sandwich::vcovHC)
+#    num.boot: number of null bootstrap samples. Increase to stabilize across runs.
+# Note: results are probabilitistic and may change slightly at every run. 
+#
+# Adapted from the p_adjust from from the hdm package, written by Philipp Bach.
+# https://github.com/PhilippBach/hdm_prev/blob/master/R/p_adjust.R
+summary_rw_lm <- function(model, indices=NULL, cov.type="HC2", num.boot=10000) {
+
+  if (is.null(indices)) {
+    indices <- 1:nrow(coef(summary(model)))
+  }
+  # Grab the original t values.
+  summary <- coef(summary(model))[indices,,drop=FALSE]
+  t.orig <- summary[, "t value"]
+
+  # Null resampling.
+  # This is a trick to speed up bootstrapping linear models.
+  # Here, we don't really need to re-fit linear regressions, which would be a bit slow.
+  # We know that betahat ~ N(beta, Sigma), and we have an estimate Sigmahat.
+  # So we can approximate "null t-values" by
+  #  - Draw beta.boot ~ N(0, Sigma-hat) --- note the 0 here, this is what makes it a *null* t-value.
+  #  - Compute t.boot = beta.boot / sqrt(diag(Sigma.hat))
+  Sigma.hat <- vcovHC(model, type=cov.type)[indices, indices]
+  se.orig <- sqrt(diag(Sigma.hat))
+  num.coef <- length(se.orig)
+  beta.boot <- mvrnorm(n=num.boot, mu=rep(0, num.coef), Sigma=Sigma.hat)
+  t.boot <- sweep(beta.boot, 2, se.orig, "/")
+  p.adj <- romano_wolf_correction(t.orig, t.boot)
+
+  result <- cbind(summary[,c(1,2,4),drop=F], p.adj)
+  colnames(result) <- c('Estimate', 'Std. Error', 'Orig. p-value', 'Adj. p-value')
+  result
+}
+```
+
+```{r HTE ARI based on Race}
+
+set.seed(1)
+group = 'race'
+covariates = c("confidence_number","review_length_quantile", "race")
+fmla <- formula(paste0("~ 0 +", paste0(covariates, collapse="+")))
+XX <- model.matrix(fmla, ICLR_analysis_ARI)
+W=ICLR_analysis_ARI[,"W"]
+Y=ICLR_analysis_ARI[,"rating_number"]
+
+
+forest.tau <- causal_forest(XX, Y, W) 
+
+tau.hat <- predict(forest.tau)$predictions 
+m.hat <- forest.tau$Y.hat  # E[Y|X] estimates
+e.hat <- forest.tau$W.hat  # e(X) := E[W|X] estimates (or known quantity)
+tau.hat <- forest.tau$predictions  # tau(X) estimates
+  
+# Predicting mu.hat(X[i], 1) and mu.hat(X[i], 0) for obs in held-out sample
+# Note: to understand this, read equations 6-8 in this vignette
+# https://grf-labs.github.io/grf/articles/muhats.html
+mu.hat.0 <- m.hat - e.hat * tau.hat        # E[Y|X,W=0] = E[Y|X] - e(X)*tau(X)
+mu.hat.1 <- m.hat + (1 - e.hat) * tau.hat  # E[Y|X,W=1] = E[Y|X] + (1 - e(X))*tau(X)
+
+# Compute AIPW scores
+aipw.scores <- tau.hat + W / e.hat * (Y -  mu.hat.1) - (1 - W) / (1 - e.hat) * (Y -  mu.hat.0)
+
+# Estimate average treatment effect conditional on group membership
+fmla <- formula(paste0('aipw.scores ~ factor(', group, ')'))
+ols <- lm(fmla, data=transform(ICLR_analysis_ARI[covariates], aipw.scores=aipw.scores))
+summary_rw_lm(ols)
+
+test_calibration(forest.tau)
+best_linear_projection(forest.tau,ICLR_analysis_ARI[,covariates])
+
+```
+Intercept is Asian in this case. Which to to say if you are hispanic your scores went down even more then other races. The ATE is    estimate     std.err 
+-0.26718011  0.02602556  with target.sample = "overlap" which means that if you're non-hispanic it seems like your scores are actually higher then if you are hispanic. This would indicate race
+
+
+
+```{r data processing for highly successful authors}
+
+authors_p = inner_join(ICLR_2017_authors[c('year','authors','forum')],ICLR_2018[c('year','authors','forum')], by ='authors')
+authors_p = inner_join(authors_p, ICLR_2019[c('year','authors','forum')], by ='authors')
+authors_p = unique(authors_p)
+
+authors_p = tidyr::extract(authors_p,authors,c("First_Name","Last_Name"), "([^ ]+) (.*)")
+
+authors_p = na.omit(authors_p)
+
+authors_p['race'] = predict_ethnicity(firstnames = authors_p$First_Name, lastnames = authors_p$Last_Name, method = "fullname")[7]
+
+authors_p = authors_p %>% dplyr::select(First_Name, Last_Name, race)
+
+authors_p = left_join(authors_p,authors, by =c("First_Name","Last_Name"))
+authors_p = authors_p %>% dplyr::select(-race.x)
+authors_p = unique(authors_p)
+
+
+authors_p = dplyr::rename(authors_p, race=race.y)
+
+
+df = authors_p %>% group_by(race) %>%
+  dplyr::summarise(n = n()) %>%
+  mutate(freq = round(n  / sum(n ), 3))
+df
+
+prestigious_forums = unique(authors_p$forum)
+
+ICLR_reviews = ICLR_reviews %>% mutate (presti_paper = ifelse(forum %in% prestigious_forums, 1, 0))
+
+
+rm(ICLR_analysis_ARIP)
+ICLR_analysis_ARIP = ICLR_reviews %>% filter(year %in% c(2017,2018))
+
+ICLR_analysis_ARIP = full_join(x=ICLR_analysis_ARIP,y=authors_p,by="forum")
+
+ICLR_reviews %>% filter(forum == 'B1-q5Pqxl')
+
+ICLR_analysis_ARIP %>% filter(forum == 'B1-q5Pqxl')
+
+authors_p %>% filter(forum == 'B1-q5Pqxl')
+
+
+ICLR_analysis_ARIP = ICLR_analysis_ARIP %>% mutate(W = if_else(year.x==2017,0,1))
+
+ICLR_analysis_ARIP = na.omit(ICLR_analysis_ARIP)
+ICLR_analysis_ARIP = unique(ICLR_analysis_ARIP)
+
+ICLR_analysis_ARIP%>% group_by(W) %>% summarise(n())
+
+
+#auditing data to see if correct
+authors %>% filter(First_Name=="Angeliki", Last_Name=="Lazaridou")
+authors_p %>% filter(First_Name=="Angeliki", Last_Name=="Lazaridou")
+ICLR_2017_authors %>% dplyr::select(forum, year, authors)%>%  filter(authors == "Angeliki Lazaridou") %>% unique()
+ICLR_2018 %>% dplyr::select(forum, year, authors)%>% filter(authors=="Angeliki Lazaridou") %>% unique()
+ICLR_2019 %>% dplyr::select(forum, year, authors)%>%  filter(authors=="Angeliki Lazaridou") %>% unique()
+```
+```{r HTE ARI based on Prestege}
+
+ICLR_analysis_ARI = ICLR_reviews %>% filter(year %in% c(2017,2018))
+ICLR_analysis_ARI = full_join(x=ICLR_analysis_ARI,y=authors,by="forum")
+ICLR_analysis_ARI = ICLR_analysis_ARI %>% mutate(W = if_else(year.x==2017,0,1))
+ICLR_analysis_ARI = na.omit(ICLR_analysis_ARI)
+ICLR_analysis_ARI = unique(ICLR_analysis_ARI)
+
+set.seed(1)
+group = 'presti_paper'
+covariates = c("confidence_number","review_length_quantile", "race",'presti_paper')
+fmla <- formula(paste0("~ 0 +", paste0(covariates, collapse="+")))
+XX <- model.matrix(fmla, ICLR_analysis_ARI)
+W=ICLR_analysis_ARI[,"W"]
+Y=ICLR_analysis_ARI[,"rating_number"]
+
+
+forest.tau <- causal_forest(XX, Y, W) 
+
+tau.hat <- predict(forest.tau)$predictions 
+m.hat <- forest.tau$Y.hat  # E[Y|X] estimates
+e.hat <- forest.tau$W.hat  # e(X) := E[W|X] estimates (or known quantity)
+tau.hat <- forest.tau$predictions  # tau(X) estimates
+  
+# Predicting mu.hat(X[i], 1) and mu.hat(X[i], 0) for obs in held-out sample
+# Note: to understand this, read equations 6-8 in this vignette
+# https://grf-labs.github.io/grf/articles/muhats.html
+mu.hat.0 <- m.hat - e.hat * tau.hat        # E[Y|X,W=0] = E[Y|X] - e(X)*tau(X)
+mu.hat.1 <- m.hat + (1 - e.hat) * tau.hat  # E[Y|X,W=1] = E[Y|X] + (1 - e(X))*tau(X)
+
+# Compute AIPW scores
+aipw.scores <- tau.hat + W / e.hat * (Y -  mu.hat.1) - (1 - W) / (1 - e.hat) * (Y -  mu.hat.0)
+
+# Estimate average treatment effect conditional on group membership
+fmla <- formula(paste0('aipw.scores ~ factor(', group, ')'))
+ols <- lm(fmla, data=transform(ICLR_analysis_ARI[covariates], aipw.scores=aipw.scores))
+summary_rw_lm(ols)
+test_calibration(forest.tau)
+
+
+
+```
+
+```{r}
+X <- model.matrix(formula("~ 0 + review_length_quantile + confidence_number"), ICLR_analysis_ARIP)
+W <- ICLR_analysis_ARIP$W
+Y <- ICLR_analysis_ARIP$rating_number
+par(mfrow=c(1,2))
+for (w in c(0, 1)) {
+  plot(X[W==w,1] + rnorm(n=sum(W==w), sd=.1), X[W==w,2] + rnorm(n=sum(W==w), sd=.1), 
+       pch=ifelse(Y, 23, 21), cex=1, col=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)),
+       bg=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)), main=ifelse(w, "Treated", "Untreated"), xlab="confidence_number", ylab="review_length_quantile")
+}
+
+```
+```{r}
+X <- model.matrix(formula("~ 0 + confidence_number + race"), ICLR_analysis_ARIP)
+W <- ICLR_analysis_ARIP$W
+Y <- ICLR_analysis_ARIP$rating_number
+par(mfrow=c(1,2))
+for (w in c(0, 1)) {
+  plot(X[W==w,1] + rnorm(n=sum(W==w), sd=.1), X[W==w,2] + rnorm(n=sum(W==w), sd=.1), 
+       pch=ifelse(Y, 23, 21), cex=1, col=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)),
+       bg=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)), main=ifelse(w, "Treated", "Untreated"), xlab="confidence_number", ylab="race")
+}
+```
+```{r}
+X <- model.matrix(formula("~ 0 + review_length_quantile + race"), ICLR_analysis_ARIP)
+W <- ICLR_analysis_ARIP$W
+Y <- ICLR_analysis_ARIP$rating_number
+par(mfrow=c(1,2))
+for (w in c(0, 1)) {
+  plot(X[W==w,1] + rnorm(n=sum(W==w), sd=.1), X[W==w,2] + rnorm(n=sum(W==w), sd=.1), 
+       pch=ifelse(Y, 23, 21), cex=1, col=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)),
+       bg=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)), main=ifelse(w, "Treated", "Untreated"), xlab="review_length_quantile", ylab="race")
+}
+```
+
+```{r AIPW with causal forest ICLR_analysis_ARIP}
+#names(ICLR_analysis)
+#c("rating","confidence","review","rating number","confidence number","review length","First_Name","Last_Name","race")
+
+#why does this change with adding additional covariates specifically race?
+covariates = c("confidence_number","review_length_quantile", "race")
+XX <- model.matrix(formula(paste0("~", paste0(covariates, collapse="+"))), data=ICLR_analysis_ARIP)
+
+set.seed(1)
+
+forest <- causal_forest(
+              X=XX,  
+              W=ICLR_analysis_ARIP[,"W"],
+              Y=ICLR_analysis_ARIP[,"rating_number"]
+              #,num.trees = 100
+              )
+
+#what does the target sample mean and what I should use
+forest.ate <- average_treatment_effect(forest)
+
+#forest.ate <- average_treatment_effect(forest, target.sample="control")
+forest.ate
+hist(forest$W.hat, main="Estimated propensity scores \n(causal forest with )", xlim=c(-.1, 1.1))
+
+```
+   estimate     std.err 
+-0.26022760
+```{r HTE based on Race Prestegious Authors}
+
+set.seed(1)
+group = 'race'
+fmla <- formula(paste0("~ 0 +", paste0(covariates, collapse="+")))
+XX <- model.matrix(fmla, ICLR_analysis_ARIP)
+W=ICLR_analysis_ARIP[,"W"]
+Y=ICLR_analysis_ARIP[,"rating_number"]
+
+
+forest.tau <- causal_forest(XX, Y, W) 
+
+tau.hat <- predict(forest.tau)$predictions 
+m.hat <- forest.tau$Y.hat  # E[Y|X] estimates
+e.hat <- forest.tau$W.hat  # e(X) := E[W|X] estimates (or known quantity)
+tau.hat <- forest.tau$predictions  # tau(X) estimates
+  
+# Predicting mu.hat(X[i], 1) and mu.hat(X[i], 0) for obs in held-out sample
+# Note: to understand this, read equations 6-8 in this vignette
+# https://grf-labs.github.io/grf/articles/muhats.html
+mu.hat.0 <- m.hat - e.hat * tau.hat        # E[Y|X,W=0] = E[Y|X] - e(X)*tau(X)
+mu.hat.1 <- m.hat + (1 - e.hat) * tau.hat  # E[Y|X,W=1] = E[Y|X] + (1 - e(X))*tau(X)
+
+# Compute AIPW scores
+aipw.scores <- tau.hat + W / e.hat * (Y -  mu.hat.1) - (1 - W) / (1 - e.hat) * (Y -  mu.hat.0)
+
+# Estimate average treatment effect conditional on group membership
+fmla <- formula(paste0('aipw.scores ~ factor(', group, ')'))
+ols <- lm(fmla, data=transform(ICLR_analysis_ARIP[covariates], aipw.scores=aipw.scores))
+summary_rw_lm(ols)
+test_calibration(forest.tau )
+
+
+
+```
+
+
+```{r clean data by submission}
+ICLR_analysis_Submission = ICLR_reviews
+
+
+ICLR_analysis_Submission = ICLR_analysis_Submission %>% group_by(forum, year) %>% 
+  summarise(ave_rating = mean(rating_number), ave_review_len = mean(review_length), ave_confidence_number = mean(confidence_number))
+
+ICLR_analysis_Submission = full_join(x=ICLR_analysis_Submission,y=authors,by="forum")
+
+ICLR_analysis_Submission = na.omit(ICLR_analysis_Submission)
+
+ICLR_analysis_Submission = dummy_cols(ICLR_analysis_Submission, select_columns = "race")
+
+ICLR_analysis_Submission = ICLR_analysis_Submission %>% group_by(forum) %>%
+  summarise(year = year.x,
+            ave_review_len = ave_review_len, 
+            ave_rating=ave_rating,
+            ave_confidence_number = ave_confidence_number,
+            asian_authors = sum(race_asian), 
+            black_authors = sum(race_black), 
+            hispanic_authors = sum(race_hispanic), 
+            white_authors = sum(race_white), 
+            total_authors = sum(race_asian,race_black,race_hispanic,race_white)) %>%
+  unique()
+ICLR_analysis_Submission = na.omit(ICLR_analysis_Submission)
+#ICLR_analysis_Submission
+ICLR_analysis_Submission = ICLR_analysis_Submission %>% mutate(W = if_else(year==2017,0,1))
+
+#ntile(ICLR_analysis_Submission$ave_review_len, 3)
+
+ICLR_analysis_Submission$ave_review_length_quantile = ntile(ICLR_analysis_Submission$ave_review_len, 4)
+
+
+ICLR_analysis_Submission$racial_majority = colnames(ICLR_analysis_Submission[,c( "asian_authors","black_authors", "hispanic_authors","white_authors")])[max.col(ICLR_analysis_Submission[,c( "asian_authors","black_authors", "hispanic_authors","white_authors")])]
+#ICLR_analysis_Submission %>% filter(First_Name=='Jake')
+
+prestigious_forums = unique(authors_p$forum)
+
+ICLR_analysis_Submission = ICLR_analysis_Submission %>% mutate (presti_paper = ifelse(forum %in% prestigious_forums, 1, 0))
+
+ICLR_analysis_Submission %>% filter(forum=='B1-Hhnslg')
+ICLR_analysis_Submission %>% filter(forum=='Hk8N3Sclg')
+
+hist(ICLR_analysis_Submission$ave_review_length_quantile)
+names(ICLR_analysis_Submission)
+```
+
+```{r}
+ICLR_analysis_Submission_1718 = ICLR_analysis_Submission %>% filter(year %in% c(2017,2018))
+ICLR_analysis_Submission_1718 = as.data.frame(ICLR_analysis_Submission_1718)
+
+names(ICLR_analysis_Submission_1718)
+
+
+```
+
+```{r submission level causal forest ATE}
+
+covariates = c("ave_confidence_number","ave_review_length_quantile", "asian_authors","black_authors", "hispanic_authors","white_authors")
+XX <- model.matrix(formula(paste0("~", paste0(covariates, collapse="+"))), data=ICLR_analysis_Submission_1718)
+
+set.seed(1)
+
+forest <- causal_forest(
+              X=XX,  
+              W=ICLR_analysis_Submission_1718[,"W"],
+              Y=ICLR_analysis_Submission_1718[,"ave_rating"]
+              #,num.trees = 100
+              )
+
+#what does the target sample mean and what I should use
+forest.ate <- average_treatment_effect(forest)
+
+#forest.ate <- average_treatment_effect(forest, target.sample="control")
+forest.ate
+hist(forest$W.hat, main="Estimated propensity scores \n(causal forest with submission data)", xlim=c(-.1, 1.1))
+
+```
+
+```{r submssion placebo of 2018-2019}
+
+ICLR_analysis_Submission_1819 = ICLR_analysis_Submission %>% filter(year %in% c(2019,2018))
+
+ICLR_analysis_Submission_1819 = ICLR_analysis_Submission_1819 %>% mutate(W = if_else(year==2018,0,1))
+ICLR_analysis_Submission_1819 = as.data.frame(ICLR_analysis_Submission_1819)
+
+covariates = c("ave_confidence_number","ave_review_length_quantile", "asian_authors","black_authors", "hispanic_authors","white_authors")
+XX <- model.matrix(formula(paste0("~", paste0(covariates, collapse="+"))), data=ICLR_analysis_Submission_1819)
+
+set.seed(1)
+
+forest <- causal_forest(
+              X=XX,  
+              W=ICLR_analysis_Submission_1819[,"W"],
+              Y=ICLR_analysis_Submission_1819[,"ave_rating"]
+              #,num.trees = 100
+              )
+
+#what does the target sample mean and what I should use
+forest.ate <- average_treatment_effect(forest)
+
+#forest.ate <- average_treatment_effect(forest, target.sample="control")
+forest.ate
+hist(forest$W.hat)
+hist(get_scores(forest))
+```
+```{r HTE Analysis of Submission}
+
+set.seed(1)
+rm(HTE_Submission)
+group = 'racial_majority'
+#group = 'racial_majority'
+covariates = c("ave_confidence_number","ave_review_length_quantile", 'racial_majority','presti_paper')
+
+ICLR_analysis_Submission_1718$racial_majority = as.factor(ICLR_analysis_Submission_1718[,'racial_majority'])
+ICLR_analysis_Submission_1718$racial_majority = unclass(ICLR_analysis_Submission_1718$racial_majority)
+#attr(,"levels") "asian_authors"    "black_authors"    "hispanic_authors" "white_authors"   
+XX <- model.matrix(formula(paste0("~", paste0(covariates, collapse="+"))), data=ICLR_analysis_Submission_1718)
+W=ICLR_analysis_Submission_1718[,"W"]
+Y=ICLR_analysis_Submission_1718[,"ave_rating"]
+
+
+
+forest.tau <- causal_forest(XX, Y, W) 
+
+tau.hat <- predict(forest.tau)$predictions 
+m.hat <- forest.tau$Y.hat  # E[Y|X] estimates
+e.hat <- forest.tau$W.hat  # e(X) := E[W|X] estimates (or known quantity)
+tau.hat <- forest.tau$predictions  # tau(X) estimates
+  
+# Predicting mu.hat(X[i], 1) and mu.hat(X[i], 0) for obs in held-out sample
+# Note: to understand this, read equations 6-8 in this vignette
+# https://grf-labs.github.io/grf/articles/muhats.html
+mu.hat.0 <- m.hat - e.hat * tau.hat        # E[Y|X,W=0] = E[Y|X] - e(X)*tau(X)
+mu.hat.1 <- m.hat + (1 - e.hat) * tau.hat  # E[Y|X,W=1] = E[Y|X] + (1 - e(X))*tau(X)
+
+# Compute AIPW scores
+aipw.scores <- tau.hat + W / e.hat * (Y -  mu.hat.1) - (1 - W) / (1 - e.hat) * (Y -  mu.hat.0)
+
+# Estimate average treatment effect conditional on group membership
+fmla <- formula(paste0('aipw.scores ~ factor(', group, ')'))
+ols <- lm(fmla, data=transform(ICLR_analysis_Submission_1718[covariates], aipw.scores=aipw.scores))
+
+summary_rw_lm(ols)
+hist(forest.tau$W.hat)
+
+test_calibration(forest.tau)
+
+```
+
+
+
+```{r}
+X <- model.matrix(formula("~ 0 + ave_review_length_quantile + ave_confidence_number"), ICLR_analysis_Submission_1718)
+W <- ICLR_analysis_Submission_1718$W
+Y <- ICLR_analysis_Submission_1718$ave_rating
+par(mfrow=c(1,2))
+for (w in c(0, 1)) {
+  plot(X[W==w,1] + rnorm(n=sum(W==w), sd=.1), X[W==w,2] + rnorm(n=sum(W==w), sd=.1), 
+       pch=ifelse(Y, 23, 21), cex=1, col=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)),
+       bg=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)), main=ifelse(w, "Treated", "Untreated"), xlab="ave_confidence_number", ylab="ave_review_length_quantile")
+}
+
+```
+```{r}
+X <- model.matrix(formula("~ 0 + ave_confidence_number + total_authors"), ICLR_analysis_Submission_1718)
+W <- ICLR_analysis_Submission_1718$W
+Y <- ICLR_analysis_Submission_1718$ave_rating
+par(mfrow=c(1,2))
+for (w in c(0, 1)) {
+  plot(X[W==w,1] + rnorm(n=sum(W==w), sd=.1), X[W==w,2] + rnorm(n=sum(W==w), sd=.1), 
+       pch=ifelse(Y, 23, 21), cex=1, col=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)),
+       bg=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)), main=ifelse(w, "Treated", "Untreated"), xlab="confidence_number", ylab="total_authors")
+}
+```
+```{r}
+X <- model.matrix(formula("~ 0 + ave_review_length_quantile + total_authors"), ICLR_analysis_Submission_1718)
+W <- ICLR_analysis_Submission_1718$W
+Y <- ICLR_analysis_Submission_1718$ave_rating
+par(mfrow=c(1,2))
+for (w in c(0, 1)) {
+  plot(X[W==w,1] + rnorm(n=sum(W==w), sd=.1), X[W==w,2] + rnorm(n=sum(W==w), sd=.1), 
+       pch=ifelse(Y, 23, 21), cex=1, col=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)),
+       bg=ifelse(Y, rgb(1,0,0,1/4), rgb(0,0,1,1/4)), main=ifelse(w, "Treated", "Untreated"), xlab="review_length_quantile", ylab="total_authors")
+}
+```
+```{r HTE Analysis of Submission only senior authors}
+
+set.seed(1)
+rm(HTE_Submission)
+group = 'racial_majority'
+#group = 'racial_majority'
+covariates = c("ave_confidence_number","ave_review_length_quantile", 'racial_majority')
+
+ICLR_analysis_Submission_p_1718 = ICLR_analysis_Submission_1718 %>% filter(presti_paper ==1)
+
+ICLR_analysis_Submission_p_1718$racial_majority = as.factor(ICLR_analysis_Submission_p_1718[,'racial_majority'])
+ICLR_analysis_Submission_p_1718$racial_majority = unclass(ICLR_analysis_Submission_p_1718$racial_majority)
+#attr(,"levels") "asian_authors"    "black_authors"    "hispanic_authors" "white_authors"   
+XX <- model.matrix(formula(paste0("~", paste0(covariates, collapse="+"))), data=ICLR_analysis_Submission_p_1718)
+W=ICLR_analysis_Submission_p_1718[,"W"]
+Y=ICLR_analysis_Submission_p_1718[,"ave_rating"]
+
+
+
+forest.tau <- causal_forest(XX, Y, W) 
+
+tau.hat <- predict(forest.tau)$predictions 
+m.hat <- forest.tau$Y.hat  # E[Y|X] estimates
+e.hat <- forest.tau$W.hat  # e(X) := E[W|X] estimates (or known quantity)
+tau.hat <- forest.tau$predictions  # tau(X) estimates
+  
+# Predicting mu.hat(X[i], 1) and mu.hat(X[i], 0) for obs in held-out sample
+# Note: to understand this, read equations 6-8 in this vignette
+# https://grf-labs.github.io/grf/articles/muhats.html
+mu.hat.0 <- m.hat - e.hat * tau.hat        # E[Y|X,W=0] = E[Y|X] - e(X)*tau(X)
+mu.hat.1 <- m.hat + (1 - e.hat) * tau.hat  # E[Y|X,W=1] = E[Y|X] + (1 - e(X))*tau(X)
+
+# Compute AIPW scores
+aipw.scores <- tau.hat + W / e.hat * (Y -  mu.hat.1) - (1 - W) / (1 - e.hat) * (Y -  mu.hat.0)
+
+# Estimate average treatment effect conditional on group membership
+fmla <- formula(paste0('aipw.scores ~ factor(', group, ')'))
+ols <- lm(fmla, data=transform(ICLR_analysis_Submission_p_1718[covariates], aipw.scores=aipw.scores))
+
+summary_rw_lm(ols)
+hist(forest.tau$W.hat)
+
+test_calibration(forest.tau)
+
+```
+
+
+
